@@ -39,6 +39,7 @@ stopPeriod delay sids
   = initPeriod delay f sids
   where f sid = STOP
 
+masterProcess :: [ProcessId] -> Int -> Int -> Int -> Process ()
 masterProcess sids sendPeriod gracePeriod_ minStopPeriod = do
   sendJobsPeriod sendPeriod sids
   gracePeriod gracePeriod_ sids

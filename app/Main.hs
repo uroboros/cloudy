@@ -9,42 +9,45 @@ import Slave (slave)
 import Master (masterProcess, calcPeriods)
 
 import System.Environment (getArgs)
-import Control.Monad (replicateM)
+import Control.Monad (replicateM, forM)
 import Control.Applicative ((<$>))
-import Network.Transport.TCP (createTransport, defaultTCPParameters)
+
 import Control.Distributed.Process
 import Control.Distributed.Process.Closure
-import Control.Distributed.Process.Node
+import Control.Distributed.Process.Node hiding (newLocalNode)
+import Control.Distributed.Process.Backend.SimpleLocalnet
+
 import System.Random (mkStdGen)
+import Data.Word
+import Control.Concurrent (forkIO, threadDelay)
 
--- CONFIG =====================================================
--- TODO find homes for...
-_masterHost = "127.0.0.1"
-_masterPort = "10502"
-_slaveCount = 6::Int -- TODO load slaves from config!
-
+-- SLAVE CONFIG -------------
 _minStopPeriod = 50000::Int
-_slaveTick = 100
--- ============================================================
+_slaveTick = 200
+-----------------------------
 
 remotable ['slave, 'jobQuery]
 rt :: RemoteTable
 rt = Main.__remoteTable initRemoteTable
 
--- TODO spawnLocal -> remote for all spawn functions...
-spawnMaster host port = do
-  Right transport <- createTransport host port defaultTCPParameters
-  pid <- newLocalNode transport rt
+startSlaveNode host port = do
+      backend <- initializeBackend host port initRemoteTable
+      startSlave backend
+
+spawnSlave :: NodeId -> ProcessId -> Int -> Process ProcessId
+spawnSlave sid workQ tick = do
+  let state = initSlaveState workQ tick
+  -- TODO? pid <- spawn sid ($(mkClosure 'slave) state)
+  pid <- spawnLocal (slave state)
   return pid
+
+spawnSlaves :: [NodeId] -> ProcessId -> Int -> Process [ProcessId]
+spawnSlaves slaves workQ tick = do
+  forM slaves $ \sid -> spawnSlave sid workQ tick
 
 spawnWorkQueue seed
   = spawnLocal $ do workQ (mkStdGen seed) initIndex
   where initIndex = 1
-
-spawnSlaves workQ tick = do
-  let state = initSlaveState workQ tick
-  sids <- replicateM _slaveCount $ spawnLocal (slave state)
-  return sids
 
 parseArgs k l s minStop = do
     let periods = calcPeriods (read k) (read l) minStop
@@ -56,17 +59,18 @@ main :: IO ()
 main = do
         args <- getArgs
         case args of
-          [k, l, s] -> do
+          ["master", host, port, k, l, s] -> do
             ((sendPeriod, gracePeriod, minStopPeriod),seed) <- parseArgs k l s _minStopPeriod
 
-            master <- spawnMaster _masterHost _masterPort
-            runProcess master $ do
-              mId <- getSelfNode
+            backend <- initializeBackend host port initRemoteTable
+            startMaster backend (\nids -> do
+                                            say $ "SLAVES: " ++ (show nids)
+                                            workQueue <- spawnWorkQueue seed
+                                            sids <- spawnSlaves nids workQueue _slaveTick
+                                            masterProcess sids sendPeriod gracePeriod minStopPeriod)
 
-              workQueue <- spawnWorkQueue seed
-              sids <- spawnSlaves workQueue _slaveTick
+          ["slave", host, port] -> do
+            startSlaveNode host port
 
-              masterProcess sids sendPeriod gracePeriod minStopPeriod
-
-          _ -> do liftIO $ putStrLn $ "Missing params: k, l, s"
+          _ -> do liftIO $ putStrLn $ "Missing params..."
                   return ()
