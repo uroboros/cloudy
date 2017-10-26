@@ -4,7 +4,6 @@ module Main where
 import Lib
 
 import Types (initSlaveState)
-import WorkQueue (workQ, jobQuery)
 import Slave (slave)
 import Master (masterProcess, calcPeriods)
 
@@ -22,11 +21,11 @@ import Data.Word
 import Control.Concurrent (forkIO, threadDelay)
 
 -- SLAVE CONFIG -------------
-_minStopPeriod = 50000::Int
+_minStopPeriod = 200000::Int
 _slaveTick = 200
 -----------------------------
 
-remotable ['slave, 'jobQuery]
+remotable [] -- TODO remotable ['slave]
 rt :: RemoteTable
 rt = Main.__remoteTable initRemoteTable
 
@@ -34,20 +33,16 @@ startSlaveNode host port = do
       backend <- initializeBackend host port initRemoteTable
       startSlave backend
 
-spawnSlave :: NodeId -> ProcessId -> Int -> Process ProcessId
-spawnSlave sid workQ tick = do
-  let state = initSlaveState workQ tick
+spawnSlave :: NodeId -> Int -> Int -> Process ProcessId
+spawnSlave sid tick seed = do
+  let state = initSlaveState tick seed
   -- TODO? pid <- spawn sid ($(mkClosure 'slave) state)
   pid <- spawnLocal (slave state)
   return pid
 
-spawnSlaves :: [NodeId] -> ProcessId -> Int -> Process [ProcessId]
-spawnSlaves slaves workQ tick = do
-  forM slaves $ \sid -> spawnSlave sid workQ tick
-
-spawnWorkQueue seed
-  = spawnLocal $ do workQ (mkStdGen seed) initIndex
-  where initIndex = 1
+spawnSlaves :: [NodeId] -> Int -> Int -> Process [ProcessId]
+spawnSlaves slaves tick seed = do
+  forM slaves $ \sid -> spawnSlave sid tick seed
 
 parseArgs k l s minStop = do
     let periods = calcPeriods (read k) (read l) minStop
@@ -65,9 +60,9 @@ main = do
             backend <- initializeBackend host port initRemoteTable
             startMaster backend (\nids -> do
                                             say $ "SLAVES: " ++ (show nids)
-                                            workQueue <- spawnWorkQueue seed
-                                            sids <- spawnSlaves nids workQueue _slaveTick
-                                            masterProcess sids sendPeriod gracePeriod minStopPeriod)
+                                            sids <- spawnSlaves nids _slaveTick seed
+                                            masterProcess sids sendPeriod gracePeriod minStopPeriod
+                                            terminateAllSlaves backend)
 
           ["slave", host, port] -> do
             startSlaveNode host port

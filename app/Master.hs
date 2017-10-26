@@ -5,8 +5,7 @@ import Control.Distributed.Process.Closure
 import Control.Distributed.Process.Node
 import Control.Concurrent (threadDelay)
 
-import Types (SlaveStatus(..))
-import WorkQueue (workQ, jobQuery)
+import Types (SlaveStatus(..),XMessage(..))
 import Slave (slave)
 
 -- given k,l - ensure a sensible 'minStopPeriod'
@@ -19,28 +18,32 @@ calcPeriods sendPeriod gracePeriod minStopPeriod
         else (planB, planB, planB)
   where planB = (sendPeriod + gracePeriod) `div` 3
 
--- Manage Slave States --
-sendSlaves f sids = mapM_ (\sid -> send sid (f sid)) sids
-peerIds sids sid = filter (/= sid) sids
+-- Send a Msg to all sids
+sendSlaves msg sids = mapM_ ((flip send) msg) sids
 
-initPeriod delay f sids = do
-  sendSlaves f sids
-  liftIO $ threadDelay delay
-
-sendJobsPeriod delay sids
-  = initPeriod delay sendF sids
-  where sendF sid = peerIds sids sid
-
-gracePeriod delay sids
-  = initPeriod delay f sids
-  where f sid = GRACE
-
-stopPeriod delay sids
-  = initPeriod delay f sids
-  where f sid = STOP
+-- Send a single message to a slave to kickstart the sending process.
+-- Because the sender (master) is not on the ring of slave nodes, the slave will interpret this msg as a "kickstart"
+kickstartSending sid = do
+    masterPid <- getSelfPid
+    say $ "Send KICKSTART message to >>> " ++ (show sid)
+    send sid (XMessage masterPid initIndex dummyRand)
+  where initIndex = 0
+        dummyRand = 1.0
 
 masterProcess :: [ProcessId] -> Int -> Int -> Int -> Process ()
-masterProcess sids sendPeriod gracePeriod_ minStopPeriod = do
-  sendJobsPeriod sendPeriod sids
-  gracePeriod gracePeriod_ sids
-  stopPeriod minStopPeriod sids
+masterProcess sids sendPeriod gracePeriod minStopPeriod = do
+  -- SEND PERIOD -----------------------------
+  -- initialise Slaves by sending each one all the slaveIds on the Ring
+  sendSlaves sids sids
+  -- send a message to any slave, say the first, to kickstart the sending process
+  kickstartSending (head sids)
+
+  liftIO $ threadDelay sendPeriod
+
+  -- GRACE PERIOD ----------------------------
+  sendSlaves GRACE sids
+  liftIO $ threadDelay gracePeriod
+
+  -- STOP PERIOD -----------------------------
+  sendSlaves STOP sids
+  liftIO $ threadDelay minStopPeriod
